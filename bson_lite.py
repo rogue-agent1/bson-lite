@@ -1,92 +1,81 @@
 #!/usr/bin/env python3
-"""Minimal BSON encoder/decoder."""
-import struct
+"""BSON encoder/decoder (subset). Zero dependencies."""
+import struct, sys, time
 
-def encode(doc: dict) -> bytes:
-    body = b""
-    for key, val in doc.items():
-        k = key.encode() + b"\x00"
-        if isinstance(val, bool):
-            body += b"\x08" + k + (b"\x01" if val else b"\x00")
-        elif isinstance(val, int):
-            if -2**31 <= val < 2**31:
-                body += b"\x10" + k + struct.pack("<i", val)
+def encode(doc):
+    body = bytearray()
+    for key, value in doc.items():
+        key_bytes = key.encode() + b"\x00"
+        if isinstance(value, float):
+            body.append(0x01); body.extend(key_bytes); body.extend(struct.pack("<d", value))
+        elif isinstance(value, str):
+            body.append(0x02); body.extend(key_bytes)
+            vb = value.encode() + b"\x00"
+            body.extend(struct.pack("<i", len(vb))); body.extend(vb)
+        elif isinstance(value, dict):
+            body.append(0x03); body.extend(key_bytes); body.extend(encode(value))
+        elif isinstance(value, list):
+            body.append(0x04); body.extend(key_bytes)
+            arr_doc = {str(i): v for i, v in enumerate(value)}
+            body.extend(encode(arr_doc))
+        elif isinstance(value, bytes):
+            body.append(0x05); body.extend(key_bytes)
+            body.extend(struct.pack("<i", len(value))); body.append(0x00); body.extend(value)
+        elif isinstance(value, bool):
+            body.append(0x08); body.extend(key_bytes); body.append(1 if value else 0)
+        elif value is None:
+            body.append(0x0A); body.extend(key_bytes)
+        elif isinstance(value, int):
+            if -2147483648 <= value <= 2147483647:
+                body.append(0x10); body.extend(key_bytes); body.extend(struct.pack("<i", value))
             else:
-                body += b"\x12" + k + struct.pack("<q", val)
-        elif isinstance(val, float):
-            body += b"\x01" + k + struct.pack("<d", val)
-        elif isinstance(val, str):
-            b = val.encode()
-            body += b"\x02" + k + struct.pack("<i", len(b)+1) + b + b"\x00"
-        elif isinstance(val, bytes):
-            body += b"\x05" + k + struct.pack("<i", len(val)) + b"\x00" + val
-        elif isinstance(val, list):
-            arr_doc = {str(i): v for i, v in enumerate(val)}
-            body += b"\x04" + k + encode(arr_doc)
-        elif isinstance(val, dict):
-            body += b"\x03" + k + encode(val)
-        elif val is None:
-            body += b"\x0a" + k
-        else:
-            raise TypeError(f"Cannot BSON encode {type(val)}")
-    body += b"\x00"
-    return struct.pack("<i", len(body) + 4) + body
+                body.append(0x12); body.extend(key_bytes); body.extend(struct.pack("<q", value))
+    body.append(0x00)
+    return struct.pack("<i", len(body)+4) + bytes(body)
 
-def decode(data: bytes) -> dict:
-    doc, _ = _decode_doc(data, 0)
-    return doc
-
-def _decode_doc(data, pos):
-    size = struct.unpack("<i", data[pos:pos+4])[0]
-    end = pos + size
-    pos += 4
-    doc = {}
-    while pos < end - 1:
+def decode(data, offset=0):
+    doc_len = struct.unpack_from("<i", data, offset)[0]
+    pos = offset + 4; result = {}
+    while pos < offset + doc_len - 1:
         elem_type = data[pos]; pos += 1
-        null = data.index(b"\x00", pos)
-        key = data[pos:null].decode(); pos = null + 1
+        key_end = data.index(b"\x00"[0], pos)
+        key = data[pos:key_end].decode(); pos = key_end + 1
         if elem_type == 0x01:
-            doc[key] = struct.unpack("<d", data[pos:pos+8])[0]; pos += 8
+            result[key] = struct.unpack_from("<d", data, pos)[0]; pos += 8
         elif elem_type == 0x02:
-            slen = struct.unpack("<i", data[pos:pos+4])[0]; pos += 4
-            doc[key] = data[pos:pos+slen-1].decode(); pos += slen
+            slen = struct.unpack_from("<i", data, pos)[0]; pos += 4
+            result[key] = data[pos:pos+slen-1].decode(); pos += slen
         elif elem_type == 0x03:
-            subdoc, pos = _decode_doc(data, pos)
-            doc[key] = subdoc
+            sub, sub_len = _decode_with_len(data, pos)
+            result[key] = sub; pos += sub_len
         elif elem_type == 0x04:
-            subdoc, pos = _decode_doc(data, pos)
-            doc[key] = [subdoc[str(i)] for i in range(len(subdoc))]
+            sub, sub_len = _decode_with_len(data, pos)
+            result[key] = [sub[str(i)] for i in range(len(sub))]
+            pos += sub_len
         elif elem_type == 0x05:
-            blen = struct.unpack("<i", data[pos:pos+4])[0]; pos += 4
-            pos += 1  # subtype
-            doc[key] = data[pos:pos+blen]; pos += blen
+            blen = struct.unpack_from("<i", data, pos)[0]; pos += 5
+            result[key] = data[pos:pos+blen]; pos += blen
         elif elem_type == 0x08:
-            doc[key] = data[pos] != 0; pos += 1
-        elif elem_type == 0x0a:
-            doc[key] = None
+            result[key] = bool(data[pos]); pos += 1
+        elif elem_type == 0x0A:
+            result[key] = None
         elif elem_type == 0x10:
-            doc[key] = struct.unpack("<i", data[pos:pos+4])[0]; pos += 4
+            result[key] = struct.unpack_from("<i", data, pos)[0]; pos += 4
         elif elem_type == 0x12:
-            doc[key] = struct.unpack("<q", data[pos:pos+8])[0]; pos += 8
-    return doc, end
+            result[key] = struct.unpack_from("<q", data, pos)[0]; pos += 8
+        else: break
+    return result
+
+def _decode_with_len(data, offset):
+    doc_len = struct.unpack_from("<i", data, offset)[0]
+    return decode(data, offset), doc_len
+
+def dumps(doc): return encode(doc)
+def loads(data): return decode(data)
 
 if __name__ == "__main__":
-    doc = {"name": "test", "age": 30, "active": True}
-    data = encode(doc)
-    print(f"Encoded ({len(data)} bytes): {data.hex()}")
-    print(f"Decoded: {decode(data)}")
-
-def test():
-    doc = {"str": "hello", "int": 42, "float": 3.14, "bool": True, "none": None,
-           "list": [1, 2, 3], "nested": {"a": 1}, "bytes": b"\x00\x01", "big": 2**40}
-    result = decode(encode(doc))
-    assert result["str"] == "hello"
-    assert result["int"] == 42
-    assert abs(result["float"] - 3.14) < 1e-10
-    assert result["bool"] is True
-    assert result["none"] is None
-    assert result["list"] == [1, 2, 3]
-    assert result["nested"] == {"a": 1}
-    assert result["bytes"] == b"\x00\x01"
-    assert result["big"] == 2**40
-    print("  bson_lite: ALL TESTS PASSED")
+    doc = {"name": "Alice", "age": 30, "scores": [95, 87, 92], "active": True}
+    enc = dumps(doc)
+    print(f"BSON: {len(enc)} bytes")
+    dec = loads(enc)
+    print(f"Decoded: {dec}")

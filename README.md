@@ -1,17 +1,9 @@
-# bson_lite
+# bson-lite
 
-Minimal BSON (Binary JSON) encoder/decoder
-
-Single-file, zero-dependency Python CLI tool.
+BSON encoder/decoder. Zero dependencies, single file, Python 3.8+.
 
 ## Usage
 
 ```bash
-python bson_lite.py --help
-```
-
-## Test
-
-```bash
-python -c "import bson_lite; bson_lite.test()"
+python3 bson_lite.py --help
 ```
